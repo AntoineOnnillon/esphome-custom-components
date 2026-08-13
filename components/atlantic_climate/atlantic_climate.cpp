@@ -57,6 +57,31 @@ void AtlanticClimate::send_pending_frame_() {
   this->tx_payload_len_ = 0;
 }
 
+void AtlanticClimate::send_raw_payload_with_wire_src(uint8_t wire_src,
+                                                    const std::vector<uint8_t> &payload) {
+  if (payload.empty() || payload.size() > BUFFER_SIZE - 6) {
+    ESP_LOGE(TAG, "send_raw_payload_with_wire_src: taille invalide (%u)",
+             static_cast<unsigned>(payload.size()));
+    return;
+  }
+  uint8_t buf[BUFFER_SIZE]{};
+  uint8_t idx = 0;
+  buf[idx++] = 0xDC;
+  buf[idx++] = 0x80 | wire_src;              // wire_sender spoofe
+  buf[idx++] = 0x00;                          // dst wire = maitre
+  buf[idx++] = static_cast<uint8_t>(payload.size() + 6);
+  for (auto b : payload)
+    buf[idx++] = b;
+  uint16_t crc = crc16_(buf, idx);
+  buf[idx++] = (crc >> 8) & 0xFF;
+  buf[idx++] = crc & 0xFF;
+  this->invert_(buf, idx);
+  this->write_array(buf, idx);
+  this->flush();
+  ESP_LOGW(TAG, "IMPERSONATION: raw payload emis avec wire_src=0x%02X (%u o payload, %u o trame)",
+           wire_src, static_cast<unsigned>(payload.size()), idx);
+}
+
 // -------- Encodage des payloads --------
 
 void AtlanticClimate::encode_temperature_frame_(float temperature) {
@@ -348,9 +373,12 @@ void AtlanticClimate::debug_dump_frame_(uint8_t wire_src, uint8_t wire_dst,
     }
   }
   if (slot >= 0) {
-    if (this->sniff_slots_[slot].hash == h)
-      return;  // Identique a la derniere fois, on ne re-log pas.
+    if (this->sniff_slots_[slot].hash == h) {
+      this->sniff_slots_[slot].count++;
+      return;  // Identique a la derniere fois, on incremente le compteur mais on ne re-log pas.
+    }
     this->sniff_slots_[slot].hash = h;
+    this->sniff_slots_[slot].count = 1;
     tag_state = "CHANGED";
   } else {
     for (int i = 0; i < 32; i++) {
@@ -365,6 +393,7 @@ void AtlanticClimate::debug_dump_frame_(uint8_t wire_src, uint8_t wire_dst,
     }
     this->sniff_slots_[slot].key = key;
     this->sniff_slots_[slot].hash = h;
+    this->sniff_slots_[slot].count = 1;
   }
 
   // Dump hex complet du payload.
@@ -543,6 +572,38 @@ void AtlanticClimate::setup() {
 
   // Watchdog: verifie toutes les 60s que les sondes HA sont toujours vivantes.
   this->set_interval("atlantic_wdog", 60000, [this]() { this->watchdog_check_(); });
+
+  // Dump periodique des stats du sniffer -> revele le trafic silencieux (broadcasts
+  // periodiques dont le hash ne change pas et qu'on ne re-log donc pas).
+  if (this->debug_frames_)
+    this->set_interval("atlantic_sniff_stats", 60000, [this]() { this->sniff_dump_stats(); });
+}
+
+void AtlanticClimate::sniff_dump_stats() {
+  ESP_LOGI(TAG, "=== SNIFF STATS ===");
+  uint8_t used = 0;
+  for (int i = 0; i < 32; i++) {
+    auto &s = this->sniff_slots_[i];
+    if (s.key == 0)
+      continue;
+    used++;
+    uint8_t wire_src = static_cast<uint8_t>((s.key >> 40) & 0xFF);
+    uint8_t op = static_cast<uint8_t>((s.key >> 32) & 0xFF);
+    uint8_t app_src = static_cast<uint8_t>((s.key >> 24) & 0xFF);
+    uint8_t app_dst = static_cast<uint8_t>((s.key >> 16) & 0xFF);
+    uint16_t reg = static_cast<uint16_t>(s.key & 0xFFFF);
+    ESP_LOGI(TAG,
+             "  slot[%2d] wire=%02X app src=0x%02X dst=0x%02X op=0x%02X reg=0x%04X seen=%u",
+             i, wire_src, app_src, app_dst, op, reg, s.count);
+  }
+  ESP_LOGI(TAG, "=== %u slots occupes ===", used);
+}
+
+void AtlanticClimate::sniff_reset() {
+  for (int i = 0; i < 32; i++)
+    this->sniff_slots_[i] = {};
+  this->sniff_next_slot_ = 0;
+  ESP_LOGW(TAG, "Sniff dedup table RESET (32 slots)");
 }
 
 void AtlanticClimate::update() {

@@ -94,6 +94,17 @@ class AtlanticClimate : public climate::Climate, public PollingComponent, public
   //   nouveau "panneau" sur le bus. `counter` est le compteur interne, `state_flag` = octet
   //   principal du reg 0x0248 (0xD1 sur le panneau reel).
   void emulate_panel_burst(uint8_t src_module, uint8_t counter, uint8_t state_flag);
+  // - send_raw_payload_with_wire_src: comme send_raw_payload mais force le `wire_sender` du
+  //   header (au lieu de notre 0x80|address_). Necessaire pour phase D: pour que les replies
+  //   du maitre soient routees vers un AUTRE module physique (ex: 0x05 = panneau), il faut
+  //   emettre avec le wire_sender de ce module. ATTENTION: peut vraiment perturber le bus.
+  void send_raw_payload_with_wire_src(uint8_t wire_src, const std::vector<uint8_t> &payload);
+
+  // --- Sniff stats / reset ---
+  // Dump immediat de tous les slots occupes (registres vus + compteurs d'occurrences).
+  void sniff_dump_stats();
+  // Reset la table de deduplication -> chaque trame re-logue comme NEW une fois.
+  void sniff_reset();
 
  protected:
   // Emission
@@ -125,11 +136,12 @@ class AtlanticClimate : public climate::Climate, public PollingComponent, public
   bool sniff_all_frames_{false};
 
   // Table de deduplication pour le sniff: cle = 6 octets packes (wire_src + 5 premiers octets du payload),
-  // valeur = hash FNV-1a du payload. On ne re-log une trame que si son hash change.
+  // valeur = hash FNV-1a du payload + compteur d'occurrences depuis la derniere valeur distincte.
   // 32 slots pour absorber la variete supplementaire quand sniff_all_frames_ est actif.
   struct SniffSlot {
     uint64_t key;
     uint32_t hash;
+    uint32_t count;  // occurrences avec ce hash exact (revele le trafic silencieux)
   };
   SniffSlot sniff_slots_[32]{};
   uint8_t sniff_next_slot_{0};

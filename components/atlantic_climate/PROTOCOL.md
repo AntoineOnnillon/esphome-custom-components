@@ -1,7 +1,7 @@
 # Protocole Atlantic — notes de reverse engineering
 
 Document vivant : chaque decouverte est ajoutee ici.
-Derniere mise a jour : 2026-08-13 (mode promiscue + suite tests A/B/C impersonation)
+Derniere mise a jour : 2026-08-13 (routage wire vs. applicatif decouvert)
 
 ## 1. Couche physique
 
@@ -215,22 +215,44 @@ log a maintenant `wire=SRC->DST` en prefixe pour distinguer.
 - [x] **Phase 0 (baseline)** : `sniff_all_frames: true` + 2-3 min d'observation ->
   lister les nouvelles trames panel<->chaudiere jamais vues avant (probablement une
   ecriture 0x03 depuis 0x05 vers 0x2D sur reg 0x051E ou proche).
+  ⚠ *Constate : quand le systeme est **Mode:OFF**, le panneau et 0x2D ne broadcastent
+  quasiment plus. Refaire l'observation en Mode:HEAT.*
 - [x] **Phase A** : bouton `Test A - Fake 0x40 notify 0x0211` (mode HEAT+CONFORT).
-  Objectif : verifier acceptation d'un notify depuis identite jamais vue.
-  *(fait 2026-08-13 : trame emise OK, reaction chaudiere a documenter)*
-- [ ] **Phase A bis** : bouton `Test A - Fake 0x40 notify 0x0212` (mimique du 0x31).
-  Attendu : silence (doublon d'un module qui broadcast deja ce registre).
-- [ ] **Phase B panel** : bouton `Test B - Fake 0x40 panel burst`.
-  Rejoue les 3 notify du panneau (0x0213 + 0x0219 + 0x0248) depuis fake 0x40.
-  Attendu (a valider) : la chaudiere ecrit-elle vers 0x40 apres ce burst ?
-- [ ] **Phase B read** : boutons `Test B - Fake 0x40 probe 0x058E / 0x051E`.
-  Attendu (a valider) : reponse arrive-t-elle avec `wire_dst=0x40` (donc visible uniquement
-  grace au sniff promiscue) ?
+  *(2026-08-13 : trame emise OK, aucune reaction visible de la chaudiere)*
+- [x] **Phase A bis** : bouton `Test A - Fake 0x40 notify 0x0212`. *(idem: silence)*
+- [x] **Phase B panel** : bouton `Test B - Fake 0x40 panel burst`.
+  *(2026-08-13 : 2 bursts, aucun handshake / write vers 0x40 en retour)*
+- [x] **Phase B read** : `Test B - Fake 0x40 probe 0x051E`.
+  ✅ **DECOUVERTE CLE** : la chaudiere repond a notre probe fake avec `app_dst=0x40`
+  (`07 2D 40 05 1E 00 06 AD`). Elle traite 0x40 comme un module legitime pour les reads.
+  ⚠ En revanche, le probe `0x058E` avec src=0x40 **n'a pas provoque de reponse visible**
+  (a re-tester : peut-etre filtre par identite, peut-etre dedup si valeur inchangee).
 - [ ] **Phase C conflit** : bouton `Test C - Impersonate 0x2E notify 0x0212`.
   Attendu : la valeur qu'on injecte remplace-t-elle le broadcast du vrai module ?
-  Utile pour savoir si on peut *override* un module existant.
-- [ ] **Phase D (dangereux)** : spoof sonde ambiante via `0x05` — verifier prealablement
-  que le vrai panneau n'emet PAS sur `0x051E` en broadcast (sinon guerre de trames).
-  **Prerequis** : identifier la trame reelle du panneau grace au sniff promiscue.
+- [ ] **Phase D (dangereux)** : bouton `Test D - Wire-spoof 0x05 notify 0x0213` disponible.
+  Emet avec `wire_sender=0x05` (celui du panneau physique). Si le maitre route les
+  replies au *vrai panneau* au lieu de nous -> confirmation que le routage physique
+  est bien base sur le wire_sender du dernier message. **Faire uniquement panneau debranche**.
 - [ ] **Phase E** : capturer les frames du boot de la chaudiere (couper/remettre alim)
   pour identifier un eventuel handshake permettant d'enregistrer notre propre ID.
+
+### 12.4 Routage wire vs. applicatif (decouverte 2026-08-13)
+
+Les tests phase B ont revele que **le routage physique est decorrele du routage applicatif** :
+
+| Champ | Role |
+|---|---|
+| `wire_sender` (header, bit 7 fixe a 1) | Adresse physique de l'emetteur *sur le bus UART* |
+| `wire_dst` (header) | Adresse physique du destinataire — utilisee par le maitre pour router |
+| `payload src` (app_src) | Identite *logique* du module emetteur (peut etre spoofee librement) |
+| `payload dst` (app_dst) | Identite *logique* du destinataire — le module cible verifie que c'est bien lui |
+
+Consequence :
+
+- Depuis notre wire address `0x07`, on peut emettre un `read` avec `app_src=0x40` : la
+  chaudiere traite la requete comme venant de `0x40`, met `app_dst=0x40` dans la reply,
+  mais le maitre relaie physiquement avec `wire_dst=0x07` (nous).
+- Pour intercepter une reply destinee a un **autre** module physique (ex: panneau `0x05`),
+  il faut spoofer aussi le `wire_sender` du header (helper `send_raw_payload_with_wire_src`).
+- La chaudiere semble ne repondre aux `0x06` que sur certains registres selon l'identite
+  (`0x051E` OK depuis 0x40, `0x058E` a re-verifier).
