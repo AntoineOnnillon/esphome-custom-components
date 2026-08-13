@@ -16,8 +16,6 @@ AtlanticClimate = atlantic_climate_ns.class_(
 )
 
 CONF_ADDRESS = "address"
-CONF_DEBUG_FRAMES = "debug_frames"
-CONF_SNIFF_ALL_FRAMES = "sniff_all_frames"
 CONF_REFERENCE_SENSOR = "reference_sensor"
 CONF_ROOMS = "rooms"
 CONF_ROOM_CURRENT = "current"

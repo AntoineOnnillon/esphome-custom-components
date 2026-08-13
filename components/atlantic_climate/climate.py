@@ -6,7 +6,6 @@ from . import (
     AtlanticClimate,
     CONF_ADDRESS,
     CONF_DEADBAND,
-    CONF_DEBUG_FRAMES,
     CONF_DELTA_MAX,
     CONF_IDLE_OFFSET,
     CONF_MANUAL_HOLD,
@@ -16,7 +15,6 @@ from . import (
     CONF_ROOM_TARGET,
     CONF_ROOMS,
     CONF_SAFE_TARGET,
-    CONF_SNIFF_ALL_FRAMES,
     CONF_WATCHDOG_TIMEOUT,
 )
 
@@ -35,8 +33,6 @@ CONFIG_SCHEMA = (
     .extend(
         {
             cv.Optional(CONF_ADDRESS, default=7): cv.int_range(min=1, max=126),
-            cv.Optional(CONF_DEBUG_FRAMES, default=False): cv.boolean,
-            cv.Optional(CONF_SNIFF_ALL_FRAMES, default=False): cv.boolean,
             cv.Optional(CONF_REFERENCE_SENSOR): cv.use_id(sensor.Sensor),
             cv.Optional(CONF_ROOMS): cv.ensure_list(ROOM_SCHEMA),
             cv.Optional(CONF_DEADBAND, default=0.2): cv.float_range(min=0.05, max=5),
@@ -59,8 +55,6 @@ async def to_code(config):
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
     cg.add(var.set_address(config[CONF_ADDRESS]))
-    cg.add(var.set_debug_frames(config[CONF_DEBUG_FRAMES]))
-    cg.add(var.set_sniff_all_frames(config[CONF_SNIFF_ALL_FRAMES]))
 
     if (ref_id := config.get(CONF_REFERENCE_SENSOR)) is not None:
         ref = await cg.get_variable(ref_id)
