@@ -75,16 +75,25 @@ void AtlanticClimate::encode_temperature_frame_(float temperature) {
 }
 
 void AtlanticClimate::probe_register(uint8_t target, uint16_t reg) {
+  this->probe_register_as(DEFAULT_SRC_MODULE, target, reg);
+}
+
+void AtlanticClimate::probe_register_as(uint8_t src_module, uint8_t target, uint16_t reg) {
   uint8_t *p = this->tx_payload_;
   uint8_t i = 0;
   p[i++] = 0x06;
-  p[i++] = 0x3D;  // notre identite sur le bus applicatif
+  p[i++] = src_module;
   p[i++] = target;
   p[i++] = (reg >> 8) & 0xFF;
   p[i++] = reg & 0xFF;
   this->tx_payload_len_ = i;
   this->send_pending_frame_();
-  ESP_LOGI(TAG, "Probe envoye: target=0x%02X reg=0x%04X", target, reg);
+  if (src_module == DEFAULT_SRC_MODULE) {
+    ESP_LOGI(TAG, "Probe envoye: target=0x%02X reg=0x%04X", target, reg);
+  } else {
+    ESP_LOGW(TAG, "IMPERSONATION: probe src=0x%02X target=0x%02X reg=0x%04X",
+             src_module, target, reg);
+  }
 }
 
 void AtlanticClimate::send_raw_payload(const std::vector<uint8_t> &payload) {
@@ -114,6 +123,22 @@ void AtlanticClimate::broadcast_notify(uint8_t src_module, uint16_t reg,
   ESP_LOGW(TAG, "IMPERSONATION: notify emise en tant que 0x%02X reg=0x%04X", src_module, reg);
 }
 
+void AtlanticClimate::write_register_as(uint8_t src_module, uint8_t target, uint16_t reg,
+                                        const std::vector<uint8_t> &data) {
+  std::vector<uint8_t> payload;
+  payload.reserve(5 + data.size());
+  payload.push_back(0x03);              // opcode write
+  payload.push_back(src_module);        // src module (potentiellement fake)
+  payload.push_back(target);            // dst
+  payload.push_back((reg >> 8) & 0xFF);
+  payload.push_back(reg & 0xFF);
+  for (auto b : data)
+    payload.push_back(b);
+  this->send_raw_payload(payload);
+  ESP_LOGW(TAG, "IMPERSONATION: write src=0x%02X target=0x%02X reg=0x%04X (%u o)",
+           src_module, target, reg, static_cast<unsigned>(data.size()));
+}
+
 void AtlanticClimate::impersonate_ambient(uint8_t src_module, float temperature) {
   if (temperature < 0.0f || temperature > 50.0f) {
     ESP_LOGE(TAG, "impersonate_ambient: temperature hors plage (%.1f)", temperature);
@@ -124,6 +149,24 @@ void AtlanticClimate::impersonate_ambient(uint8_t src_module, float temperature)
                                 static_cast<uint8_t>(raw & 0xFF)};
   this->broadcast_notify(src_module, 0x051E, data);
   ESP_LOGW(TAG, "IMPERSONATION: sonde ambiante spoofee = %.2fC (src=0x%02X)", temperature, src_module);
+}
+
+void AtlanticClimate::emulate_panel_burst(uint8_t src_module, uint8_t counter, uint8_t state_flag) {
+  // Rejoue les 3 notify observees du panneau reel (0x05), mais depuis src_module fake.
+  // Objectif: verifier si la chaudiere "enregistre" un nouveau panneau et interagit avec lui.
+  //
+  // reg 0x0213 - stable, 4 octets utiles "00 00 42 01".
+  this->broadcast_notify(src_module, 0x0213, {0x00, 0x00, 0x42, 0x01});
+  // reg 0x0219 - compteur monotone, byte[6] increment ~+1.6/min. On expose `counter`.
+  //   Structure supposee: 7 octets, dernier = compteur. Trame minimale plausible.
+  this->broadcast_notify(src_module, 0x0219, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, counter});
+  // reg 0x0248 - etat panneau (22o). state_flag == D1 sur le panneau reel.
+  this->broadcast_notify(src_module, 0x0248,
+                          {state_flag, 0x00, 0x08, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+                           0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                           0x00, 0x00});
+  ESP_LOGW(TAG, "IMPERSONATION: burst panneau emis en tant que 0x%02X (counter=0x%02X flag=0x%02X)",
+           src_module, counter, state_flag);
 }
 
 void AtlanticClimate::request_setpoint_() {
@@ -205,7 +248,8 @@ void AtlanticClimate::feed_rx_byte_(uint8_t raw) {
         this->rx_len_ = 0;
         return;
       }
-      if (this->rx_buffer_[2] != this->address_ && this->rx_buffer_[2] != BROADCAST_ADDR) {
+      if (this->rx_buffer_[2] != this->address_ && this->rx_buffer_[2] != BROADCAST_ADDR &&
+          !this->sniff_all_frames_) {
         this->rx_state_ = RX_IDLE;
         this->rx_len_ = 0;
         return;
@@ -242,8 +286,17 @@ void AtlanticClimate::process_frame_() {
 
   const uint8_t *payload = &this->rx_buffer_[4];
   uint8_t payload_len = this->rx_expected_ - 6;
+  uint8_t wire_src = this->rx_buffer_[1] & 0x7F;
+  uint8_t wire_dst = this->rx_buffer_[2];
 
-  this->debug_dump_frame_(payload, payload_len);
+  this->debug_dump_frame_(wire_src, wire_dst, payload, payload_len);
+
+  // En mode promiscue, on ne fait tourner les parsers d'etat que si la trame nous est
+  // reellement destinee (wire_dst == notre adresse ou broadcast). Sinon on se contente
+  // du sniff pour ne pas polluer notre etat climate avec les reponses d'un autre module.
+  bool for_us = (wire_dst == this->address_ || wire_dst == BROADCAST_ADDR);
+  if (!for_us)
+    return;
 
   if (this->parse_mode_payload_(payload, payload_len))
     return;
@@ -265,7 +318,8 @@ uint32_t AtlanticClimate::fnv1a_(const uint8_t *data, uint8_t len) {
   return h;
 }
 
-void AtlanticClimate::debug_dump_frame_(const uint8_t *payload, uint8_t len) {
+void AtlanticClimate::debug_dump_frame_(uint8_t wire_src, uint8_t wire_dst,
+                                        const uint8_t *payload, uint8_t len) {
   if (!this->debug_frames_ || len == 0)
     return;
 
@@ -277,15 +331,17 @@ void AtlanticClimate::debug_dump_frame_(const uint8_t *payload, uint8_t len) {
     return;
   }
 
-  // Cle = 5 premiers octets du payload (opcode + src + dst + registre 2o).
-  uint64_t key = 0;
+  // Cle = wire_src (1o) + 5 premiers octets du payload (opcode + src + dst + registre 2o).
+  // Inclure wire_src dans la cle permet de distinguer les trames identiques emises
+  // par des "relais" differents en mode promiscue.
+  uint64_t key = static_cast<uint64_t>(wire_src) << 40;
   for (uint8_t i = 0; i < len && i < 5; i++)
     key |= static_cast<uint64_t>(payload[i]) << ((4 - i) * 8);
   uint32_t h = fnv1a_(payload, len);
 
   const char *tag_state = "NEW";
   int slot = -1;
-  for (int i = 0; i < 16; i++) {
+  for (int i = 0; i < 32; i++) {
     if (this->sniff_slots_[i].key == key) {
       slot = i;
       break;
@@ -297,7 +353,7 @@ void AtlanticClimate::debug_dump_frame_(const uint8_t *payload, uint8_t len) {
     this->sniff_slots_[slot].hash = h;
     tag_state = "CHANGED";
   } else {
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < 32; i++) {
       if (this->sniff_slots_[i].key == 0) {
         slot = i;
         break;
@@ -305,7 +361,7 @@ void AtlanticClimate::debug_dump_frame_(const uint8_t *payload, uint8_t len) {
     }
     if (slot < 0) {
       slot = this->sniff_next_slot_;
-      this->sniff_next_slot_ = (this->sniff_next_slot_ + 1) & 15;
+      this->sniff_next_slot_ = (this->sniff_next_slot_ + 1) & 31;
     }
     this->sniff_slots_[slot].key = key;
     this->sniff_slots_[slot].hash = h;
@@ -327,8 +383,9 @@ void AtlanticClimate::debug_dump_frame_(const uint8_t *payload, uint8_t len) {
   uint8_t src = len >= 2 ? payload[1] : 0;
   uint8_t dst = len >= 3 ? payload[2] : 0;
   uint16_t reg = len >= 5 ? (static_cast<uint16_t>(payload[3]) << 8) | payload[4] : 0;
-  ESP_LOGI(TAG, "[sniff %s] src=0x%02X dst=0x%02X op=0x%02X(%s) reg=0x%04X len=%u: %s",
-           tag_state, src, dst, payload[0], op_desc, reg, len, hexbuf);
+  ESP_LOGI(TAG,
+           "[sniff %s] wire=%02X->%02X app src=0x%02X dst=0x%02X op=0x%02X(%s) reg=0x%04X len=%u: %s",
+           tag_state, wire_src, wire_dst, src, dst, payload[0], op_desc, reg, len, hexbuf);
 
   // Test de decodages 16 bits BE + LE a chaque offset.
   static const struct {

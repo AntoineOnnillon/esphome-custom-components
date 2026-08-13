@@ -1,7 +1,7 @@
 # Protocole Atlantic — notes de reverse engineering
 
 Document vivant : chaque decouverte est ajoutee ici.
-Derniere mise a jour : 2026-08-13 (confirmation sonde ambiante)
+Derniere mise a jour : 2026-08-13 (mode promiscue + suite tests A/B/C impersonation)
 
 ## 1. Couche physique
 
@@ -177,13 +177,29 @@ Pour chaque `[sniff NEW] op=0x07(read-reply) reg=0xXXXX`, appliquer cette grille
 
 L'ESP est deja reconnu comme **client** (nos `0x06`/`0x03` sont acceptes). Pour aller plus loin
 et devenir un **module a part entiere** qui broadcast ses propres notify `0x02`, on a expose
-trois primitives dans le composant :
+plusieurs primitives dans le composant :
 
 - `send_raw_payload(vec)` — payload applicatif brut, header+CRC calcules automatiquement
 - `broadcast_notify(src_module, reg, data)` — trame `02 src 00 reg_hi reg_lo <data>`
+- `write_register_as(src_module, target, reg, data)` — trame `03 src target reg_hi reg_lo <data>` (write depuis fake src)
+- `probe_register_as(src_module, target, reg)` — trame `06 src target reg_hi reg_lo` (read depuis fake src)
 - `impersonate_ambient(src_module, temperature)` — helper pour spoofer `reg=0x051E`
+- `emulate_panel_burst(src_module, counter, state_flag)` — rejoue les 3 notify observees du panneau (0x0213 + 0x0219 + 0x0248)
 
-Adresses disponibles a tester comme identite emettrice :
+### 12.1 Sniff promiscue (`sniff_all_frames: true`)
+
+Par defaut, on ne recoit que les trames dont le `wire_dst` == notre adresse (0x07) ou 0x7F.
+Avec `sniff_all_frames: true`, on capture **toutes les trames du bus**, incluant :
+
+- `panel (0x05) -> chaudiere (0x2D)` : la vraie ecriture de la sonde ambiante par le panneau
+- `chaudiere -> module fake` : reponse d'un `probe_register_as(0x40, ...)`
+- Handshakes de boot / negociation d'adresse
+
+Les parsers d'etat climate ne tournent **que** sur les trames pour nous (evite de polluer
+`current_temperature` / `target` avec les valeurs destinees a un autre module). Le sniff
+log a maintenant `wire=SRC->DST` en prefixe pour distinguer.
+
+### 12.2 Adresses disponibles a tester comme identite emettrice
 
 | Adresse | Statut observe | Risque |
 |---------|----------------|--------|
@@ -194,9 +210,27 @@ Adresses disponibles a tester comme identite emettrice :
 | `0x05` | **Panneau physique !** | ⭐⭐⭐⭐ conflit direct, DANGER |
 | `0x2D` | **Chaudiere elle-meme** | ⛔ INTERDIT |
 
-Roadmap experimentation :
-- [ ] **Phase A** : emettre `broadcast_notify(0x40, 0x0212, ...)` → observer si la chaudiere accepte / ignore / log
-- [ ] **Phase B** : tester tout registre inconnu depuis `0x40` → repertorier ceux qui provoquent une reponse
-- [ ] **Phase C** : impersonation `0x2E` — regarder si la valeur qu'on injecte est reprise par la chaudiere
-- [ ] **Phase D** (dangereux) : spoof sonde ambiante via `0x05` — verifier prealablement que le vrai panneau n'emet PAS sur `0x051E` en broadcast (sinon guerre de trames)
-- [ ] **Phase E** : capturer les frames du boot de la chaudiere (couper/remettre alim) pour identifier un eventuel handshake permettant d'enregistrer notre propre ID
+### 12.3 Roadmap experimentation (boutons YAML fournis)
+
+- [x] **Phase 0 (baseline)** : `sniff_all_frames: true` + 2-3 min d'observation ->
+  lister les nouvelles trames panel<->chaudiere jamais vues avant (probablement une
+  ecriture 0x03 depuis 0x05 vers 0x2D sur reg 0x051E ou proche).
+- [x] **Phase A** : bouton `Test A - Fake 0x40 notify 0x0211` (mode HEAT+CONFORT).
+  Objectif : verifier acceptation d'un notify depuis identite jamais vue.
+  *(fait 2026-08-13 : trame emise OK, reaction chaudiere a documenter)*
+- [ ] **Phase A bis** : bouton `Test A - Fake 0x40 notify 0x0212` (mimique du 0x31).
+  Attendu : silence (doublon d'un module qui broadcast deja ce registre).
+- [ ] **Phase B panel** : bouton `Test B - Fake 0x40 panel burst`.
+  Rejoue les 3 notify du panneau (0x0213 + 0x0219 + 0x0248) depuis fake 0x40.
+  Attendu (a valider) : la chaudiere ecrit-elle vers 0x40 apres ce burst ?
+- [ ] **Phase B read** : boutons `Test B - Fake 0x40 probe 0x058E / 0x051E`.
+  Attendu (a valider) : reponse arrive-t-elle avec `wire_dst=0x40` (donc visible uniquement
+  grace au sniff promiscue) ?
+- [ ] **Phase C conflit** : bouton `Test C - Impersonate 0x2E notify 0x0212`.
+  Attendu : la valeur qu'on injecte remplace-t-elle le broadcast du vrai module ?
+  Utile pour savoir si on peut *override* un module existant.
+- [ ] **Phase D (dangereux)** : spoof sonde ambiante via `0x05` — verifier prealablement
+  que le vrai panneau n'emet PAS sur `0x051E` en broadcast (sinon guerre de trames).
+  **Prerequis** : identifier la trame reelle du panneau grace au sniff promiscue.
+- [ ] **Phase E** : capturer les frames du boot de la chaudiere (couper/remettre alim)
+  pour identifier un eventuel handshake permettant d'enregistrer notre propre ID.
