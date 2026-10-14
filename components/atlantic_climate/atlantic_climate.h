@@ -31,6 +31,7 @@ class AtlanticClimate : public climate::Climate, public PollingComponent, public
   void set_ambient_requests_sensor(sensor::Sensor *s) { this->ambient_requests_sensor_ = s; }
   void set_ambient_responses_sensor(sensor::Sensor *s) { this->ambient_responses_sensor_ = s; }
   void set_ambient_response_age_sensor(sensor::Sensor *s) { this->ambient_response_age_sensor_ = s; }
+  void set_request_timeouts_sensor(sensor::Sensor *s) { this->request_timeouts_sensor_ = s; }
   void set_last_unknown_payload_sensor(text_sensor::TextSensor *s) { this->last_unknown_payload_sensor_ = s; }
 
   void setup() override;
@@ -80,6 +81,19 @@ class AtlanticClimate : public climate::Climate, public PollingComponent, public
   uint8_t rx_len_{0};       // octets deja recus dans rx_buffer_
   uint8_t rx_expected_{0};  // longueur totale attendue (une fois header decode)
 
+  enum PollRequest : uint8_t {
+    POLL_NONE = 0,
+    POLL_SETPOINT,
+    POLL_AMBIENT,
+  };
+  static constexpr uint32_t INTERFRAME_DELAY_MS = 50;
+  static constexpr uint32_t RESPONSE_TIMEOUT_MS = 300;
+  PollRequest poll_request_{POLL_NONE};
+  PollRequest awaiting_response_{POLL_NONE};
+  bool poll_cycle_requested_{false};
+  uint32_t next_request_at_ms_{0};
+  uint32_t response_deadline_ms_{0};
+
   // Presets memorises pour rejouer un changement mode <-> preset sans perdre l'intention.
   climate::ClimatePreset manual_preset_{climate::CLIMATE_PRESET_COMFORT};
   climate::ClimatePreset auto_preset_{climate::CLIMATE_PRESET_COMFORT};
@@ -96,6 +110,7 @@ class AtlanticClimate : public climate::Climate, public PollingComponent, public
   sensor::Sensor *ambient_requests_sensor_{nullptr};
   sensor::Sensor *ambient_responses_sensor_{nullptr};
   sensor::Sensor *ambient_response_age_sensor_{nullptr};
+  sensor::Sensor *request_timeouts_sensor_{nullptr};
   text_sensor::TextSensor *last_unknown_payload_sensor_{nullptr};
 
   uint32_t rx_bytes_{0};
@@ -105,9 +120,12 @@ class AtlanticClimate : public climate::Climate, public PollingComponent, public
   uint32_t unknown_frames_{0};
   uint32_t ambient_requests_{0};
   uint32_t ambient_responses_{0};
+  uint32_t request_timeouts_{0};
   uint32_t last_ambient_response_ms_{0};
   bool has_ambient_response_{false};
   void publish_debug_sensors_();
+  void service_polling_();
+  void handle_poll_response_(PollRequest response);
 
   // --- Persistance flash ---
   struct PersistedState {

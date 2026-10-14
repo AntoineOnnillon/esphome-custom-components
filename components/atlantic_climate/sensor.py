@@ -26,6 +26,7 @@ DEBUG_SENSOR_KEYS = (
     ("ambient_requests", "set_ambient_requests_sensor"),
     ("ambient_responses", "set_ambient_responses_sensor"),
     ("ambient_response_age", "set_ambient_response_age_sensor"),
+    ("request_timeouts", "set_request_timeouts_sensor"),
 )
 
 
