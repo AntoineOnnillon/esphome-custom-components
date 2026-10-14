@@ -70,6 +70,19 @@ class AtlanticClimate : public climate::Climate, public PollingComponent, public
   uint8_t rx_len_{0};       // octets deja recus dans rx_buffer_
   uint8_t rx_expected_{0};  // longueur totale attendue (une fois header decode)
 
+  enum PollRequest : uint8_t {
+    POLL_NONE = 0,
+    POLL_SETPOINT,
+    POLL_AMBIENT,
+  };
+  static constexpr uint32_t INTERFRAME_DELAY_MS = 50;
+  static constexpr uint32_t RESPONSE_TIMEOUT_MS = 300;
+  PollRequest poll_request_{POLL_NONE};
+  PollRequest awaiting_response_{POLL_NONE};
+  bool poll_cycle_requested_{false};
+  uint32_t next_request_at_ms_{0};
+  uint32_t response_deadline_ms_{0};
+
   // Presets memorises pour rejouer un changement mode <-> preset sans perdre l'intention.
   climate::ClimatePreset manual_preset_{climate::CLIMATE_PRESET_COMFORT};
   climate::ClimatePreset auto_preset_{climate::CLIMATE_PRESET_COMFORT};
@@ -78,6 +91,8 @@ class AtlanticClimate : public climate::Climate, public PollingComponent, public
   climate::ClimateMode last_sent_mode_{climate::CLIMATE_MODE_OFF};
 
   sensor::Sensor *ambient_temp_sensor_{nullptr};
+  void service_polling_();
+  void handle_poll_response_(PollRequest response);
 
   // --- Persistance flash ---
   struct PersistedState {

@@ -95,6 +95,50 @@ void AtlanticClimate::request_ambient_temperature_() {
   this->probe_register_(0x2D, 0x051E);
 }
 
+void AtlanticClimate::handle_poll_response_(PollRequest response) {
+  if (this->awaiting_response_ != response)
+    return;
+
+  this->awaiting_response_ = POLL_NONE;
+  this->poll_request_ = response == POLL_SETPOINT ? POLL_AMBIENT : POLL_NONE;
+  this->next_request_at_ms_ = millis() + INTERFRAME_DELAY_MS;
+}
+
+void AtlanticClimate::service_polling_() {
+  uint32_t now = millis();
+  if (this->awaiting_response_ != POLL_NONE) {
+    if (static_cast<int32_t>(now - this->response_deadline_ms_) < 0)
+      return;
+
+    this->poll_request_ = this->awaiting_response_ == POLL_SETPOINT ? POLL_AMBIENT : POLL_NONE;
+    this->awaiting_response_ = POLL_NONE;
+    this->next_request_at_ms_ = now + INTERFRAME_DELAY_MS;
+  }
+
+  if (this->poll_request_ == POLL_NONE) {
+    if (!this->poll_cycle_requested_)
+      return;
+    this->poll_cycle_requested_ = false;
+    this->poll_request_ = POLL_SETPOINT;
+    this->next_request_at_ms_ = now;
+  }
+
+  if (static_cast<int32_t>(now - this->next_request_at_ms_) < 0)
+    return;
+
+  const PollRequest request = this->poll_request_;
+  if (request == POLL_SETPOINT) {
+    this->request_setpoint_();
+  } else if (request == POLL_AMBIENT) {
+    this->request_ambient_temperature_();
+  } else {
+    return;
+  }
+
+  this->awaiting_response_ = request;
+  this->response_deadline_ms_ = millis() + RESPONSE_TIMEOUT_MS;
+}
+
 void AtlanticClimate::encode_mode_frame_(climate::ClimateMode mode, climate::ClimatePreset preset) {
   // Determine preset effectif suivant le mode, en s'appuyant sur la derniere valeur connue
   // pour eviter d'envoyer des trames incompletes (bug historique quand HEAT + preset=NONE
@@ -274,6 +318,7 @@ bool AtlanticClimate::parse_setpoint_payload_(const uint8_t *data, uint8_t len) 
   // Setpoint: 11 bits utiles, 5 bits bas reserves aux flags/status.
   uint16_t raw = (static_cast<uint16_t>(data[6]) << 8) | data[7];
   this->target_temperature = static_cast<float>(raw >> 5) / 2.0f;
+  this->handle_poll_response_(POLL_SETPOINT);
   ESP_LOGI(TAG, "Setpoint recu: %.1fC (raw=0x%04X)", this->target_temperature, raw);
   this->publish_state();
   return true;
@@ -290,6 +335,7 @@ bool AtlanticClimate::parse_ambient_payload_(const uint8_t *data, uint8_t len) {
   if (reg != 0x051E && reg != 0x056A)
     return false;
 
+  this->handle_poll_response_(POLL_AMBIENT);
   uint16_t raw = (static_cast<uint16_t>(data[6]) << 8) | data[7];
   float t = static_cast<float>(raw) / 64.0f;
   if (t < 0.0f || t > 50.0f) {
@@ -312,13 +358,12 @@ void AtlanticClimate::setup() {
   this->preset = climate::CLIMATE_PRESET_NONE;
   this->action = climate::CLIMATE_ACTION_OFF;
   this->load_persistent_state_();
-  this->request_setpoint_();
-  this->request_ambient_temperature_();
+  this->poll_cycle_requested_ = true;
 }
 
 void AtlanticClimate::update() {
-  this->request_setpoint_();
-  this->request_ambient_temperature_();
+  if (this->poll_request_ == POLL_NONE && this->awaiting_response_ == POLL_NONE)
+    this->poll_cycle_requested_ = true;
 }
 
 void AtlanticClimate::loop() {
@@ -329,6 +374,7 @@ void AtlanticClimate::loop() {
       break;
     this->feed_rx_byte_(byte);
   }
+  this->service_polling_();
 }
 
 void AtlanticClimate::control(const climate::ClimateCall &call) {
