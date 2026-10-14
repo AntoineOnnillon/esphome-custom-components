@@ -4,6 +4,7 @@
 #include "esphome/core/preferences.h"
 #include "esphome/components/climate/climate.h"
 #include "esphome/components/sensor/sensor.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/uart/uart.h"
 
 namespace esphome {
@@ -30,6 +31,7 @@ class AtlanticClimate : public climate::Climate, public PollingComponent, public
   void set_ambient_requests_sensor(sensor::Sensor *s) { this->ambient_requests_sensor_ = s; }
   void set_ambient_responses_sensor(sensor::Sensor *s) { this->ambient_responses_sensor_ = s; }
   void set_ambient_response_age_sensor(sensor::Sensor *s) { this->ambient_response_age_sensor_ = s; }
+  void set_last_unknown_payload_sensor(text_sensor::TextSensor *s) { this->last_unknown_payload_sensor_ = s; }
 
   void setup() override;
   void loop() override;
@@ -94,6 +96,7 @@ class AtlanticClimate : public climate::Climate, public PollingComponent, public
   sensor::Sensor *ambient_requests_sensor_{nullptr};
   sensor::Sensor *ambient_responses_sensor_{nullptr};
   sensor::Sensor *ambient_response_age_sensor_{nullptr};
+  text_sensor::TextSensor *last_unknown_payload_sensor_{nullptr};
 
   uint32_t rx_bytes_{0};
   uint32_t frames_received_{0};

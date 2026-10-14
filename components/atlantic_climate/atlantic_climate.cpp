@@ -1,6 +1,7 @@
 #include "atlantic_climate.h"
 
 #include <cmath>
+#include <cstdio>
 
 #include "esphome/core/log.h"
 
@@ -191,6 +192,7 @@ void AtlanticClimate::feed_rx_byte_(uint8_t raw) {
       invert_(this->rx_buffer_ + 4, this->rx_expected_ - 4);
       this->frames_received_++;
       this->process_frame_();
+      this->publish_debug_sensors_();
       this->rx_state_ = RX_IDLE;
       this->rx_len_ = 0;
       return;
@@ -218,6 +220,12 @@ void AtlanticClimate::process_frame_() {
     return;
 
   this->unknown_frames_++;
+  if (this->last_unknown_payload_sensor_ != nullptr) {
+    char payload_hex[2 * BUFFER_SIZE + 1]{};
+    for (uint8_t i = 0; i < payload_len; i++)
+      snprintf(payload_hex + i * 2, sizeof(payload_hex) - i * 2, "%02X", payload[i]);
+    this->last_unknown_payload_sensor_->publish_state(payload_hex);
+  }
   ESP_LOGD(TAG, "Trame inconnue (%u o payload)", payload_len);
   ESP_LOG_BUFFER_HEX_LEVEL(TAG, payload, payload_len, ESP_LOG_DEBUG);
 }
