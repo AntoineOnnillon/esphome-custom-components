@@ -259,6 +259,7 @@ bool AtlanticClimate::parse_mode_payload_(const uint8_t *data, uint8_t len) {
 
   this->mode = new_mode;
   this->preset = new_preset;
+  this->update_action_from_mode_();
   this->publish_state();
   return true;
 }
@@ -313,21 +314,6 @@ void AtlanticClimate::setup() {
   this->load_persistent_state_();
   this->request_setpoint_();
   this->request_ambient_temperature_();
-
-  // Modulation autonome: chaque changement de sonde recalcule la target.
-  for (auto &r : this->rooms_) {
-    if (r.current != nullptr)
-      r.current->add_on_state_callback([this](float) { this->modulation_recompute_(); });
-    if (r.target != nullptr)
-      r.target->add_on_state_callback([this](float) { this->modulation_recompute_(); });
-    if (r.state != nullptr)
-      r.state->add_on_state_callback([this](std::string) { this->modulation_recompute_(); });
-  }
-  if (this->reference_sensor_ != nullptr)
-    this->reference_sensor_->add_on_state_callback([this](float) { this->modulation_recompute_(); });
-
-  // Watchdog: verifie toutes les 60s que les sondes HA sont toujours vivantes.
-  this->set_interval("atlantic_wdog", 60000, [this]() { this->watchdog_check_(); });
 }
 
 void AtlanticClimate::update() {
@@ -349,12 +335,6 @@ void AtlanticClimate::control(const climate::ClimateCall &call) {
   bool mode_change = call.get_mode().has_value();
   bool preset_change = call.get_preset().has_value();
   bool temp_change = call.get_target_temperature().has_value();
-
-  // Toute action venant de HA suspend la modulation autonome pour manual_hold_ms_.
-  if (mode_change || preset_change || temp_change) {
-    this->manual_override_until_ms_ = millis() + this->manual_hold_ms_;
-    ESP_LOGI(TAG, "Override manuel actif pendant %u s", this->manual_hold_ms_ / 1000u);
-  }
 
   if (mode_change || preset_change) {
     climate::ClimateMode target_mode = mode_change ? *call.get_mode() : this->mode;
@@ -399,159 +379,13 @@ climate::ClimateTraits AtlanticClimate::traits() {
   return traits;
 }
 
-// -------- Modulation autonome --------
-
-void AtlanticClimate::add_room(sensor::Sensor *current, sensor::Sensor *target,
-                                text_sensor::TextSensor *state) {
-  this->rooms_.push_back({current, target, state});
-}
-
-float AtlanticClimate::modulation_delta_for_deficit_(float deficit) const {
-  // Rampe par morceaux: petit deficit -> petit delta (basse modulation PAC),
-  // grand deficit -> grand delta (haute modulation), sature a delta_max_.
-  if (deficit <= this->deadband_)
-    return this->idle_offset_;
-  if (deficit < 1.0f) {
-    float t = (deficit - this->deadband_) / (1.0f - this->deadband_);
-    return 0.5f + t * 1.0f;  // 0.5 -> 1.5
-  }
-  if (deficit < 3.0f)
-    return 1.5f + (deficit - 1.0f) * 1.25f;  // 1.5 -> 4.0
-  float d = 4.0f + (deficit - 3.0f) * 1.0f;
-  return d < this->delta_max_ ? d : this->delta_max_;
-}
-
-void AtlanticClimate::modulation_recompute_() {
-  if (this->rooms_.empty() || this->reference_sensor_ == nullptr)
-    return;
-
-  float ref = this->reference_sensor_->state;
-  if (std::isnan(ref))
-    return;
-
-  float max_deficit = -1000.0f;
-  bool any_valid = false;
-  uint32_t active_rooms = 0;
-  for (auto &r : this->rooms_) {
-    if (r.current == nullptr || r.target == nullptr)
-      continue;
-    if (r.state != nullptr && r.state->has_state() && r.state->state == "off")
-      continue;
-    float c = r.current->state;
-    float t = r.target->state;
-    if (std::isnan(c) || std::isnan(t))
-      continue;
-    float d = t - c;
-    if (d > max_deficit)
-      max_deficit = d;
-    any_valid = true;
-    active_rooms++;
-  }
-  if (!any_valid)
-    return;
-
-  // Sondes vivantes: le watchdog peut se detendre.
-  this->last_valid_data_ms_ = millis();
-  if (this->in_safe_mode_) {
-    ESP_LOGI(TAG, "Sortie du mode antigel: sondes HA de retour");
-    this->in_safe_mode_ = false;
-  }
-
-  float delta = this->modulation_delta_for_deficit_(max_deficit);
-  float desired_target = ref + delta;
-  if (desired_target < 15.0f) desired_target = 15.0f;
-  if (desired_target > 28.0f) desired_target = 28.0f;
-  desired_target = std::round(desired_target * 2.0f) / 2.0f;
-
-  // Telemetrie (sans throttle: c'est le calcul actuel a chaque changement).
-  if (this->deficit_sensor_ != nullptr)
-    this->deficit_sensor_->publish_state(max_deficit);
-  if (this->delta_sensor_ != nullptr)
-    this->delta_sensor_->publish_state(delta);
-  if (this->active_rooms_sensor_ != nullptr)
-    this->active_rooms_sensor_->publish_state(static_cast<float>(active_rooms));
-
-  this->update_action_(max_deficit);
-
-  // Respect override manuel: on ne pousse pas de trame tant que le hold est actif.
-  uint32_t now = millis();
-  if (this->manual_override_until_ms_ != 0 && now < this->manual_override_until_ms_) {
-    ESP_LOGD(TAG, "Modulation en pause (override manuel, %u s restants)",
-             (this->manual_override_until_ms_ - now) / 1000u);
-    return;
-  }
-  this->manual_override_until_ms_ = 0;
-
-  climate::ClimateMode desired_mode = climate::CLIMATE_MODE_HEAT;
-  bool mode_changed = desired_mode != this->last_sent_mode_;
-  bool target_changed = std::isnan(this->last_sent_target_) ||
-                        std::fabs(desired_target - this->last_sent_target_) >= 0.5f;
-
-  if (!mode_changed && !target_changed)
-    return;
-
-  if (this->last_modulation_send_ms_ != 0 && (now - this->last_modulation_send_ms_) < 30000u) {
-    ESP_LOGD(TAG, "Modulation throttlee (deficit=%.2f target=%.1f)", max_deficit, desired_target);
-    return;
-  }
-
-  ESP_LOGI(TAG, "Modulation: ref=%.1fC deficit=%.2fC delta=%.2fC -> target=%.1fC (%u pieces actives)",
-           ref, max_deficit, delta, desired_target, active_rooms);
-
-  if (mode_changed) {
-    this->encode_mode_frame_(desired_mode, climate::CLIMATE_PRESET_COMFORT);
-    this->send_pending_frame_();
-    this->last_sent_mode_ = desired_mode;
-  }
-  if (target_changed) {
-    this->encode_temperature_frame_(desired_target);
-    this->send_pending_frame_();
-    this->last_sent_target_ = desired_target;
-    this->target_temperature = desired_target;
-    this->publish_state();
-  }
-  this->last_modulation_send_ms_ = now;
-  this->save_persistent_state_();
-}
-
-void AtlanticClimate::update_action_(float max_deficit) {
-  climate::ClimateAction new_action;
+void AtlanticClimate::update_action_from_mode_() {
+  climate::ClimateAction new_action = climate::CLIMATE_ACTION_IDLE;
   if (this->mode == climate::CLIMATE_MODE_OFF)
     new_action = climate::CLIMATE_ACTION_OFF;
-  else if (max_deficit > this->deadband_)
+  else if (this->mode == climate::CLIMATE_MODE_HEAT || this->mode == climate::CLIMATE_MODE_AUTO)
     new_action = climate::CLIMATE_ACTION_HEATING;
-  else
-    new_action = climate::CLIMATE_ACTION_IDLE;
-
-  if (new_action != this->action) {
-    this->action = new_action;
-    this->publish_state();
-  }
-}
-
-void AtlanticClimate::watchdog_check_() {
-  if (this->rooms_.empty())
-    return;  // Pas de modulation autonome configuree, rien a surveiller.
-
-  uint32_t now = millis();
-  if (this->last_valid_data_ms_ == 0)
-    this->last_valid_data_ms_ = now;  // premier passage: on demarre le compteur.
-
-  bool stale = (now - this->last_valid_data_ms_) > this->watchdog_timeout_ms_;
-  if (stale && !this->in_safe_mode_) {
-    ESP_LOGW(TAG, "Watchdog: aucune sonde valide depuis %u s -> mode antigel (target=%.1fC)",
-             (now - this->last_valid_data_ms_) / 1000u, this->safe_target_);
-    this->encode_mode_frame_(climate::CLIMATE_MODE_HEAT, climate::CLIMATE_PRESET_COMFORT);
-    this->send_pending_frame_();
-    this->encode_temperature_frame_(this->safe_target_);
-    this->send_pending_frame_();
-    this->last_sent_mode_ = climate::CLIMATE_MODE_HEAT;
-    this->last_sent_target_ = this->safe_target_;
-    this->target_temperature = this->safe_target_;
-    this->publish_state();
-    this->in_safe_mode_ = true;
-    this->save_persistent_state_();
-  }
+  this->action = new_action;
 }
 
 void AtlanticClimate::save_persistent_state_() {
@@ -584,14 +418,6 @@ void AtlanticClimate::dump_config() {
   ESP_LOGCONFIG(TAG, "Atlantic Climate:");
   ESP_LOGCONFIG(TAG, "  Adresse bus: %u", this->address_);
   this->check_uart_settings(4800, 2, uart::UART_CONFIG_PARITY_ODD, 8);
-  ESP_LOGCONFIG(TAG, "  Pieces surveillees: %u", static_cast<unsigned>(this->rooms_.size()));
-  ESP_LOGCONFIG(TAG, "  Sonde de reference: %s",
-                this->reference_sensor_ != nullptr ? "configuree" : "NON DEFINIE");
-  ESP_LOGCONFIG(TAG, "  Deadband: %.2fC / delta_max: %.1fC / idle_offset: %+.2fC",
-                this->deadband_, this->delta_max_, this->idle_offset_);
-  ESP_LOGCONFIG(TAG, "  Override manuel: %u s", this->manual_hold_ms_ / 1000u);
-  ESP_LOGCONFIG(TAG, "  Watchdog: %u s / target antigel: %.1fC",
-                this->watchdog_timeout_ms_ / 1000u, this->safe_target_);
   this->dump_traits_(TAG);
 }
 

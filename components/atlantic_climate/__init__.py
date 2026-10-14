@@ -16,15 +16,4 @@ AtlanticClimate = atlantic_climate_ns.class_(
 )
 
 CONF_ADDRESS = "address"
-CONF_REFERENCE_SENSOR = "reference_sensor"
-CONF_ROOMS = "rooms"
-CONF_ROOM_CURRENT = "current"
-CONF_ROOM_TARGET = "target"
-CONF_ROOM_STATE = "state"
-CONF_DEADBAND = "deadband"
-CONF_DELTA_MAX = "delta_max"
-CONF_IDLE_OFFSET = "idle_offset"
-CONF_MANUAL_HOLD = "manual_hold"
-CONF_WATCHDOG_TIMEOUT = "watchdog_timeout"
-CONF_SAFE_TARGET = "safe_target"
 CONF_ATLANTIC_CLIMATE_ID = "atlantic_climate_id"
