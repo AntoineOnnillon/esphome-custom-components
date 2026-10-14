@@ -22,6 +22,14 @@ class AtlanticClimate : public climate::Climate, public PollingComponent, public
   void set_address(uint8_t address) { this->address_ = address; }
 
   void set_ambient_temperature_sensor(sensor::Sensor *s) { this->ambient_temp_sensor_ = s; }
+  void set_rx_bytes_sensor(sensor::Sensor *s) { this->rx_bytes_sensor_ = s; }
+  void set_frames_received_sensor(sensor::Sensor *s) { this->frames_received_sensor_ = s; }
+  void set_rejected_frames_sensor(sensor::Sensor *s) { this->rejected_frames_sensor_ = s; }
+  void set_crc_errors_sensor(sensor::Sensor *s) { this->crc_errors_sensor_ = s; }
+  void set_unknown_frames_sensor(sensor::Sensor *s) { this->unknown_frames_sensor_ = s; }
+  void set_ambient_requests_sensor(sensor::Sensor *s) { this->ambient_requests_sensor_ = s; }
+  void set_ambient_responses_sensor(sensor::Sensor *s) { this->ambient_responses_sensor_ = s; }
+  void set_ambient_response_age_sensor(sensor::Sensor *s) { this->ambient_response_age_sensor_ = s; }
 
   void setup() override;
   void loop() override;
@@ -78,6 +86,25 @@ class AtlanticClimate : public climate::Climate, public PollingComponent, public
   climate::ClimateMode last_sent_mode_{climate::CLIMATE_MODE_OFF};
 
   sensor::Sensor *ambient_temp_sensor_{nullptr};
+  sensor::Sensor *rx_bytes_sensor_{nullptr};
+  sensor::Sensor *frames_received_sensor_{nullptr};
+  sensor::Sensor *rejected_frames_sensor_{nullptr};
+  sensor::Sensor *crc_errors_sensor_{nullptr};
+  sensor::Sensor *unknown_frames_sensor_{nullptr};
+  sensor::Sensor *ambient_requests_sensor_{nullptr};
+  sensor::Sensor *ambient_responses_sensor_{nullptr};
+  sensor::Sensor *ambient_response_age_sensor_{nullptr};
+
+  uint32_t rx_bytes_{0};
+  uint32_t frames_received_{0};
+  uint32_t rejected_frames_{0};
+  uint32_t crc_errors_{0};
+  uint32_t unknown_frames_{0};
+  uint32_t ambient_requests_{0};
+  uint32_t ambient_responses_{0};
+  uint32_t last_ambient_response_ms_{0};
+  bool has_ambient_response_{false};
+  void publish_debug_sensors_();
 
   // --- Persistance flash ---
   struct PersistedState {

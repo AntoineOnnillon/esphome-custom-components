@@ -14,7 +14,7 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_ADDRESS, default=7): cv.int_range(min=1, max=126),
         }
     )
-    .extend(cv.polling_component_schema("5min"))
+    .extend(cv.polling_component_schema("1min"))
     .extend(uart.UART_DEVICE_SCHEMA)
 )
 

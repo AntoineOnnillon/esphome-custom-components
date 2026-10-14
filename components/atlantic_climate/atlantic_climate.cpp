@@ -92,6 +92,7 @@ void AtlanticClimate::request_setpoint_() {
 }
 
 void AtlanticClimate::request_ambient_temperature_() {
+  this->ambient_requests_++;
   this->probe_register_(0x2D, 0x051E);
 }
 
@@ -162,17 +163,20 @@ void AtlanticClimate::feed_rx_byte_(uint8_t raw) {
       // Header complet: inverser et valider.
       invert_(this->rx_buffer_, 4);
       if (this->rx_buffer_[0] != 0xDC || this->rx_buffer_[1] != 0x80) {
+        this->rejected_frames_++;
         this->rx_state_ = RX_IDLE;
         this->rx_len_ = 0;
         return;
       }
       if (this->rx_buffer_[2] != this->address_ && this->rx_buffer_[2] != BROADCAST_ADDR) {
+        this->rejected_frames_++;
         this->rx_state_ = RX_IDLE;
         this->rx_len_ = 0;
         return;
       }
       this->rx_expected_ = this->rx_buffer_[3];
       if (this->rx_expected_ < 10 || this->rx_expected_ > BUFFER_SIZE) {
+        this->rejected_frames_++;
         this->rx_state_ = RX_IDLE;
         this->rx_len_ = 0;
         return;
@@ -185,6 +189,7 @@ void AtlanticClimate::feed_rx_byte_(uint8_t raw) {
       if (this->rx_len_ < this->rx_expected_)
         return;
       invert_(this->rx_buffer_ + 4, this->rx_expected_ - 4);
+      this->frames_received_++;
       this->process_frame_();
       this->rx_state_ = RX_IDLE;
       this->rx_len_ = 0;
@@ -197,6 +202,7 @@ void AtlanticClimate::process_frame_() {
   uint16_t crc = crc16_(this->rx_buffer_, this->rx_expected_ - 2);
   if (this->rx_buffer_[this->rx_expected_ - 2] != ((crc >> 8) & 0xFF) ||
       this->rx_buffer_[this->rx_expected_ - 1] != (crc & 0xFF)) {
+    this->crc_errors_++;
     ESP_LOGW(TAG, "CRC invalide (attendu 0x%04X)", crc);
     return;
   }
@@ -211,6 +217,7 @@ void AtlanticClimate::process_frame_() {
   if (this->parse_ambient_payload_(payload, payload_len))
     return;
 
+  this->unknown_frames_++;
   ESP_LOGD(TAG, "Trame inconnue (%u o payload)", payload_len);
   ESP_LOG_BUFFER_HEX_LEVEL(TAG, payload, payload_len, ESP_LOG_DEBUG);
 }
@@ -290,6 +297,9 @@ bool AtlanticClimate::parse_ambient_payload_(const uint8_t *data, uint8_t len) {
   if (reg != 0x051E && reg != 0x056A)
     return false;
 
+  this->ambient_responses_++;
+  this->last_ambient_response_ms_ = millis();
+  this->has_ambient_response_ = true;
   uint16_t raw = (static_cast<uint16_t>(data[6]) << 8) | data[7];
   float t = static_cast<float>(raw) / 64.0f;
   if (t < 0.0f || t > 50.0f) {
@@ -314,11 +324,13 @@ void AtlanticClimate::setup() {
   this->load_persistent_state_();
   this->request_setpoint_();
   this->request_ambient_temperature_();
+  this->publish_debug_sensors_();
 }
 
 void AtlanticClimate::update() {
   this->request_setpoint_();
   this->request_ambient_temperature_();
+  this->publish_debug_sensors_();
 }
 
 void AtlanticClimate::loop() {
@@ -327,7 +339,31 @@ void AtlanticClimate::loop() {
     uint8_t byte;
     if (!this->read_byte(&byte))
       break;
+    this->rx_bytes_++;
     this->feed_rx_byte_(byte);
+  }
+}
+
+void AtlanticClimate::publish_debug_sensors_() {
+  if (this->rx_bytes_sensor_ != nullptr)
+    this->rx_bytes_sensor_->publish_state(static_cast<float>(this->rx_bytes_));
+  if (this->frames_received_sensor_ != nullptr)
+    this->frames_received_sensor_->publish_state(static_cast<float>(this->frames_received_));
+  if (this->rejected_frames_sensor_ != nullptr)
+    this->rejected_frames_sensor_->publish_state(static_cast<float>(this->rejected_frames_));
+  if (this->crc_errors_sensor_ != nullptr)
+    this->crc_errors_sensor_->publish_state(static_cast<float>(this->crc_errors_));
+  if (this->unknown_frames_sensor_ != nullptr)
+    this->unknown_frames_sensor_->publish_state(static_cast<float>(this->unknown_frames_));
+  if (this->ambient_requests_sensor_ != nullptr)
+    this->ambient_requests_sensor_->publish_state(static_cast<float>(this->ambient_requests_));
+  if (this->ambient_responses_sensor_ != nullptr)
+    this->ambient_responses_sensor_->publish_state(static_cast<float>(this->ambient_responses_));
+  if (this->ambient_response_age_sensor_ != nullptr) {
+    const float age = this->has_ambient_response_
+                          ? static_cast<float>(millis() - this->last_ambient_response_ms_) / 1000.0f
+                          : NAN;
+    this->ambient_response_age_sensor_->publish_state(age);
   }
 }
 
