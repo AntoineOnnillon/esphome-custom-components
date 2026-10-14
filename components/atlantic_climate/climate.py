@@ -5,6 +5,7 @@ from esphome.components import climate, uart
 from . import AtlanticClimate, CONF_ADDRESS
 
 DEPENDENCIES = ["uart"]
+AUTO_LOAD = ["sensor"]
 
 CONFIG_SCHEMA = (
     climate.climate_schema(AtlanticClimate)
